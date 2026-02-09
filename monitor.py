@@ -23,6 +23,7 @@ LOG_FILE = SCRIPT_DIR / "monitor.log"
 
 GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
+NOTIFY_EMAILS = [e.strip() for e in os.getenv("NOTIFY_EMAILS", "").split(",") if e.strip()]
 
 
 def log(msg):
@@ -33,12 +34,9 @@ def log(msg):
         f.write(line + "\n")
 
 
-def fetch_tokyo_info():
-    """Fetch the page and extract the Tokyo concert section."""
-    resp = requests.get(URL, timeout=30)
-    resp.raise_for_status()
-
-    soup = BeautifulSoup(resp.text, "html.parser")
+def parse_tokyo_info(html):
+    """Parse HTML and extract the Tokyo concert section."""
+    soup = BeautifulSoup(html, "html.parser")
     tokyo_div = soup.find("div", id="japan_march_2026")
 
     if not tokyo_div:
@@ -68,7 +66,7 @@ def fetch_tokyo_info():
     info = {
         "element_id": tokyo_div.get("id", ""),
         "date": date_el.get_text(strip=True) if date_el else "",
-        "city": ", ".join(el.get_text(strip=True) for el in city_els),
+        "city": ", ".join(el.get_text(strip=True).rstrip(",") for el in city_els),
         "venue": venue_el.get_text(strip=True) if venue_el else "",
         "button_text": button_el.get_text(strip=True) if button_el else "",
         "button_link": button_el.get("href", "") if button_el else "",
@@ -76,6 +74,13 @@ def fetch_tokyo_info():
     }
 
     return info
+
+
+def fetch_tokyo_info():
+    """Fetch the page and extract the Tokyo concert section."""
+    resp = requests.get(URL, timeout=30)
+    resp.raise_for_status()
+    return parse_tokyo_info(resp.text)
 
 
 def load_last_state():
@@ -133,14 +138,33 @@ Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
     msg = MIMEText(body)
     msg["Subject"] = "🚨 Bad Bunny Tokyo Concert Info Changed!"
+    recipients = NOTIFY_EMAILS if NOTIFY_EMAILS else [GMAIL_ADDRESS]
     msg["From"] = GMAIL_ADDRESS
-    msg["To"] = GMAIL_ADDRESS
+    msg["To"] = ", ".join(recipients)
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD.replace(" ", ""))
         server.send_message(msg)
 
     log("Alert email sent successfully!")
+
+
+MONITORED_FIELDS = ["date", "city", "venue", "button_text", "button_link"]
+
+
+def detect_changes(old_info, new_info):
+    """Compare two info dicts and return a dict of changed fields.
+
+    Returns {field: (old_value, new_value)} for each changed field,
+    or an empty dict if nothing changed.
+    """
+    changes = {}
+    for key in MONITORED_FIELDS:
+        old_val = (old_info or {}).get(key)
+        new_val = new_info.get(key)
+        if old_val != new_val:
+            changes[key] = (old_val, new_val)
+    return changes
 
 
 def main():
@@ -161,14 +185,11 @@ def main():
             f"venue={current_info['venue']}, button={current_info['button_text']}")
         return
 
-    # Compare the important fields
-    changed = False
-    for key in ["date", "city", "venue", "button_text", "button_link"]:
-        if current_info.get(key) != last_info.get(key):
-            changed = True
-            log(f"CHANGE in {key}: '{last_info.get(key)}' -> '{current_info.get(key)}'")
+    changes = detect_changes(last_info, current_info)
 
-    if changed:
+    if changes:
+        for key, (old_val, new_val) in changes.items():
+            log(f"CHANGE in {key}: '{old_val}' -> '{new_val}'")
         log("Changes detected! Sending email alert...")
         try:
             send_email(last_info, current_info)
@@ -179,5 +200,40 @@ def main():
         log("No changes detected.")
 
 
+def test_alert():
+    """Send a fake alert simulating Tokyo tickets going on sale."""
+    log("TESTING: Simulating Tokyo concert update...")
+
+    old_info = {
+        "element_id": "japan_march_2026",
+        "date": "March 2026",
+        "city": "Tokyo, Japan",
+        "venue": "TBD",
+        "button_text": "MORE INFORMATION COMING SOON",
+        "button_link": "#",
+        "full_text": "March 2026 Tokyo, Japan TBD MORE INFORMATION COMING SOON",
+    }
+
+    new_info = {
+        "element_id": "japan_march_14_2026",
+        "date": "March 14 2026",
+        "city": "Tokyo, Japan",
+        "venue": "Tokyo Dome",
+        "button_text": "TICKETS ON SALE NOW",
+        "button_link": "https://www.ticketmaster.co.jp/event/badbunny",
+        "full_text": "March 14 2026 Tokyo, Japan Tokyo Dome TICKETS ON SALE NOW",
+    }
+
+    changes = detect_changes(old_info, new_info)
+    for key, (old_val, new_val) in changes.items():
+        log(f"SIMULATED CHANGE in {key}: '{old_val}' -> '{new_val}'")
+
+    send_email(old_info, new_info)
+    log("Test alert sent! Check your inbox.")
+
+
 if __name__ == "__main__":
-    main()
+    if "--test-alert" in sys.argv:
+        test_alert()
+    else:
+        main()
