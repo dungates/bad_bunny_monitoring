@@ -1,0 +1,4 @@
+.env
+last_state.json
+monitor.log
+__pycache__/
